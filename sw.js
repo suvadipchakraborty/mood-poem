@@ -5,7 +5,7 @@
  * - PoetryDB requests are never cached: poems always come fresh from the network
  * Bump CACHE_VERSION whenever you change any shell file.
  */
-const CACHE_VERSION = 'mood-poem-v1';
+const CACHE_VERSION = 'mood-poem-v2';
 
 const SHELL = [
   './',

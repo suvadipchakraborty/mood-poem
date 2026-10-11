@@ -6,7 +6,8 @@
 
 const APP_URL = 'https://mood-poem.suvadipchakraborty.workers.dev';
 const API_BASE = 'https://poetrydb.org';
-const FETCH_TIMEOUT_MS = 20000;
+const FETCH_TIMEOUT_MS = 10000;   // per attempt
+const FETCH_ATTEMPTS = 2;         // tries per endpoint style
 
 // Card readability: prefer poems that fit comfortably on one card.
 const PREFERRED_MAX_LINES = 48;
@@ -106,31 +107,97 @@ function showToast(message) {
    ---------------------------------------------------------- */
 const poemCache = new Map(); // keyword -> poems[] (so "Find another" is instant)
 
-async function fetchPoems(keyword) {
-  if (poemCache.has(keyword)) return poemCache.get(keyword);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+async function fetchJson(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
   try {
-    // Step 2: GET https://poetrydb.org/lines/{keyword}
-    const res = await fetch(`${API_BASE}/lines/${encodeURIComponent(keyword)}`, {
-      signal: controller.signal
-    });
+    const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
     if (!res.ok) throw new Error(`PoetryDB responded with ${res.status}`);
-
-    const data = await res.json();
-    // When nothing matches, PoetryDB returns an object like { status: 404, reason: "Not found" }
-    const poems = Array.isArray(data)
-      ? data.filter((p) => p && p.title && p.author && Array.isArray(p.lines))
-      : [];
-
-    poemCache.set(keyword, poems);
-    return poems;
+    return await res.json();
   } finally {
     clearTimeout(timer);
   }
 }
+
+async function fetchPoems(keyword) {
+  if (poemCache.has(keyword)) return poemCache.get(keyword);
+
+  const kw = encodeURIComponent(keyword);
+  // Lighter request first (only the fields we use), then the plain search.
+  const urls = [
+    `${API_BASE}/lines/${kw}/title,author,lines`,
+    `${API_BASE}/lines/${kw}`
+  ];
+
+  let lastError = null;
+  for (const url of urls) {
+    for (let attempt = 0; attempt < FETCH_ATTEMPTS; attempt++) {
+      try {
+        const data = await fetchJson(url);
+        // When nothing matches, PoetryDB returns an object like { status: 404, reason: "Not found" }
+        const poems = Array.isArray(data)
+          ? data.filter((p) => p && p.title && p.author && Array.isArray(p.lines))
+          : [];
+        poemCache.set(keyword, poems);
+        return poems;
+      } catch (err) {
+        lastError = err;
+        if (!navigator.onLine) throw err;      // no point retrying offline
+        await sleep(400 * (attempt + 1));
+      }
+    }
+  }
+  throw lastError || new Error('PoetryDB request failed');
+}
+
+/* ----------------------------------------------------------
+   4b. Offline shelf: public-domain classics used when PoetryDB
+   is down or slow, so the app always has a poem to show.
+   ---------------------------------------------------------- */
+const FALLBACK_POEMS = {
+  Romantic: {
+    title: 'Sonnet 18', author: 'William Shakespeare',
+    lines: ['Shall I compare thee to a summer\'s day?', 'Thou art more lovely and more temperate:', 'Rough winds do shake the darling buds of May,', 'And summer\'s lease hath all too short a date;', 'Sometime too hot the eye of heaven shines,', 'And often is his gold complexion dimm\'d;', 'And every fair from fair sometime declines,', 'By chance or nature\'s changing course untrimm\'d;', 'But thy eternal summer shall not fade,', 'Nor lose possession of that fair thou ow\'st;', 'Nor shall death brag thou wander\'st in his shade,', 'When in eternal lines to time thou grow\'st:', 'So long as men can breathe or eyes can see,', 'So long lives this, and this gives life to thee.']
+  },
+  Melancholy: {
+    title: 'Song', author: 'Christina Rossetti',
+    lines: ['When I am dead, my dearest,', 'Sing no sad songs for me;', 'Plant thou no roses at my head,', 'Nor shady cypress tree:', 'Be the green grass above me', 'With showers and dewdrops wet;', 'And if thou wilt, remember,', 'And if thou wilt, forget.', '', 'I shall not see the shadows,', 'I shall not feel the rain;', 'I shall not hear the nightingale', 'Sing on, as if in pain:', 'And dreaming through the twilight', 'That doth not rise nor set,', 'Haply I may remember,', 'And haply may forget.']
+  },
+  Hopeful: {
+    title: '"Hope" is the thing with feathers', author: 'Emily Dickinson',
+    lines: ['"Hope" is the thing with feathers -', 'That perches in the soul -', 'And sings the tune without the words -', 'And never stops - at all -', '', 'And sweetest - in the Gale - is heard -', 'And sore must be the storm -', 'That could abash the little Bird', 'That kept so many warm -', '', 'I\'ve heard it in the chillest land -', 'And on the strangest Sea -', 'Yet - never - in Extremity,', 'It asked a crumb - of me.']
+  },
+  Furious: {
+    title: 'A Poison Tree', author: 'William Blake',
+    lines: ['I was angry with my friend;', 'I told my wrath, my wrath did end.', 'I was angry with my foe:', 'I told it not, my wrath did grow.', '', 'And I water\'d it in fears,', 'Night & morning with my tears;', 'And I sunned it with smiles,', 'And with soft deceitful wiles.', '', 'And it grew both day and night,', 'Till it bore an apple bright.', 'And my foe beheld it shine,', 'And he knew that it was mine,', '', 'And into my garden stole', 'When the night had veil\'d the pole;', 'In the morning glad I see', 'My foe outstretch\'d beneath the tree.']
+  },
+  Joyful: {
+    title: 'I Wandered Lonely as a Cloud', author: 'William Wordsworth',
+    lines: ['I wandered lonely as a cloud', 'That floats on high o\'er vales and hills,', 'When all at once I saw a crowd,', 'A host, of golden daffodils;', 'Beside the lake, beneath the trees,', 'Fluttering and dancing in the breeze.', '', 'Continuous as the stars that shine', 'And twinkle on the milky way,', 'They stretched in never-ending line', 'Along the margin of a bay:', 'Ten thousand saw I at a glance,', 'Tossing their heads in sprightly dance.', '', 'The waves beside them danced; but they', 'Out-did the sparkling waves in glee:', 'A poet could not but be gay,', 'In such a jocund company:', 'I gazed—and gazed—but little thought', 'What wealth the show to me had brought:', '', 'For oft, when on my couch I lie', 'In vacant or in pensive mood,', 'They flash upon that inward eye', 'Which is the bliss of solitude;', 'And then my heart with pleasure fills,', 'And dances with the daffodils.']
+  },
+  Anxious: {
+    title: 'Sonnet 29', author: 'William Shakespeare',
+    lines: ['When, in disgrace with fortune and men\'s eyes,', 'I all alone beweep my outcast state', 'And trouble deaf heaven with my bootless cries', 'And look upon myself and curse my fate,', 'Wishing me like to one more rich in hope,', 'Featured like him, like him with friends possess\'d,', 'Desiring this man\'s art and that man\'s scope,', 'With what I most enjoy contented least;', 'Yet in these thoughts myself almost despising,', 'Haply I think on thee, and then my state,', 'Like to the lark at break of day arising', 'From sullen earth, sings hymns at heaven\'s gate;', 'For thy sweet love remember\'d such wealth brings', 'That then I scorn to change my state with kings.']
+  },
+  Rainy: {
+    title: 'Rain', author: 'Robert Louis Stevenson',
+    lines: ['The rain is raining all around,', 'It falls on field and tree,', 'It rains on the umbrellas here,', 'And on the ships at sea.']
+  },
+  Midnight: {
+    title: 'The Cloths of Heaven', author: 'W. B. Yeats',
+    lines: ['Had I the heavens\' embroidered cloths,', 'Enwrought with golden and silver light,', 'The blue and the dim and the dark cloths', 'Of night and light and the half-light,', 'I would spread the cloths under your feet:', 'But I, being poor, have only my dreams;', 'I have spread my dreams under your feet;', 'Tread softly because you tread on my dreams.']
+  },
+  Sunny: {
+    title: 'Ah! Sun-flower', author: 'William Blake',
+    lines: ['Ah Sun-flower! weary of time,', 'Who countest the steps of the Sun;', 'Seeking after that sweet golden clime', 'Where the traveller\'s journey is done;', '', 'Where the Youth pined away with desire,', 'And the pale Virgin shrouded in snow,', 'Arise from their graves, and aspire', 'Where my Sun-flower wishes to go.']
+  },
+  Storm: {
+    title: 'Sonnet 116', author: 'William Shakespeare',
+    lines: ['Let me not to the marriage of true minds', 'Admit impediments. Love is not love', 'Which alters when it alteration finds,', 'Or bends with the remover to remove:', 'O no! it is an ever-fixed mark', 'That looks on tempests and is never shaken;', 'It is the star to every wandering bark,', 'Whose worth\'s unknown, although his height be taken.', 'Love\'s not Time\'s fool, though rosy lips and cheeks', 'Within his bending sickle\'s compass come;', 'Love alters not with his brief hours and weeks,', 'But bears it out even to the edge of doom.', 'If this be error and upon me proved,', 'I never writ, nor no man ever loved.']
+  }
+};
 
 /**
  * Step 3: randomly select ONE poem from the API array.
@@ -220,11 +287,13 @@ function buildStanzas(lines, keyword) {
   });
 }
 
-function renderPoem(poem, keyword) {
+function renderPoem(poem, keyword, { fromShelf = false, mood = '' } = {}) {
   els.title.textContent = poem.title;
   els.author.textContent = `~ by ${poem.author}`;
   els.verse.replaceChildren(...buildStanzas(poem.lines, keyword));
-  els.match.textContent = `Matched with the word “${keyword}”`;
+  els.match.textContent = fromShelf
+    ? `A classic from our own shelf for a ${mood.toLowerCase()} mood`
+    : `Matched with the word “${keyword}”`;
 }
 
 function buildGrid() {
@@ -264,43 +333,51 @@ async function loadPoemForMood(label, { excludeCurrent = false } = {}) {
 
   const excludeKey = excludeCurrent && state.poem ? poemKey(state.poem) : null;
 
-  try {
-    // Step 1: grab the mapped keyword(s), in random order
-    let chosen = null;
-    let chosenKeyword = null;
+  // Step 1: grab the mapped keyword(s), in random order
+  let chosen = null;
+  let chosenKeyword = null;
 
-    for (const keyword of shuffle(config.keywords)) {
+  for (const keyword of shuffle(config.keywords)) {
+    try {
       const poems = await fetchPoems(keyword);
       if (requestId !== state.requestId) return; // user moved on
       const poem = pickRandomPoem(poems, keyword, excludeKey);
       if (poem) { chosen = poem; chosenKeyword = keyword; break; }
+    } catch (err) {
+      if (requestId !== state.requestId) return;
+      console.warn('[Mood Poem] PoetryDB failed for', keyword, err);
     }
+  }
 
-    if (!chosen) {
-      showError('No poem matched that feeling this time', 'Try another mood or weather and we\'ll look again.', false);
-      return;
+  if (requestId !== state.requestId) return;
+
+  let fromShelf = false;
+  if (!chosen) {
+    // PoetryDB is down, slow, or had nothing: use the built-in shelf
+    const backup = FALLBACK_POEMS[label];
+    if (backup) {
+      chosen = backup;
+      chosenKeyword = config.keywords[0];
+      fromShelf = true;
     }
+  }
 
-    state.poem = extractPoem(chosen);
-    state.keyword = chosenKeyword;
-    renderPoem(state.poem, state.keyword);
-    showState('poem');
-    els.title.focus({ preventScroll: true });
-  } catch (err) {
-    if (requestId !== state.requestId) return;
-    console.error('[Mood Poem]', err);
-    const offline = !navigator.onLine;
-    const timedOut = err && err.name === 'AbortError';
+  if (!chosen) {
     showError(
       'We couldn\'t fetch a poem',
-      offline
-        ? 'You appear to be offline. Reconnect to the internet and try again.'
-        : timedOut
-          ? 'The poetry library took too long to answer. Try again in a moment.'
-          : 'The poetry library isn\'t responding right now. Try again in a moment.',
+      navigator.onLine
+        ? 'The poetry library isn\'t responding right now. Try again in a moment.'
+        : 'You appear to be offline. Reconnect to the internet and try again.',
       true
     );
+    return;
   }
+
+  state.poem = extractPoem(chosen);
+  state.keyword = chosenKeyword;
+  renderPoem(state.poem, state.keyword, { fromShelf, mood: label });
+  showState('poem');
+  els.title.focus({ preventScroll: true });
 }
 
 function showError(title, text, canRetry) {
